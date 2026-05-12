@@ -9,7 +9,7 @@ from scipy.sparse.linalg import eigs
 from scipy.sparse import csr_matrix
 import networkx as nx
 import gudhi as gd
-import config   # for bias parameters
+import config
 
 class TopoSpectralEngine:
     def __init__(self, returns_df, corr_window=60, filtration_steps=50):
@@ -25,10 +25,8 @@ class TopoSpectralEngine:
             raise ValueError("Not enough data")
         recent = self.returns.iloc[-self.corr_window:]
         corr = recent.corr().abs().values if not config.USE_SIGNED_CORR else recent.corr().values
-        # Adjacency matrix (weighted)
-        adj = corr - np.eye(self.n_assets)  # remove self
+        adj = corr - np.eye(self.n_assets)
         G = nx.from_numpy_array(adj, create_using=nx.Graph())
-        # remove negative edges if using signed
         if config.USE_SIGNED_CORR:
             edges_to_remove = [(u, v) for u, v, w in G.edges(data=True) if w['weight'] <= 0]
             G.remove_edges_from(edges_to_remove)
@@ -62,16 +60,12 @@ class TopoSpectralEngine:
 
     def persistent_homology(self, adj):
         """Compute persistence barcodes for graph filtration."""
-        # Use distance = 1 - abs(corr)
         dist = 1 - np.abs(adj)
-        # Build Rips complex
         rips = gd.RipsComplex(distance_matrix=dist, max_edge_length=1.0)
         simplex_tree = rips.create_simplex_tree(max_dimension=2)
         persistence = simplex_tree.persistence()
-        # Extract intervals
         barcode_0 = [interval for dim, interval in persistence if dim == 0]
         barcode_1 = [interval for dim, interval in persistence if dim == 1]
-        # Count intervals that persist beyond threshold
         thresh = config.PERSISTENCE_THRESHOLD
         count_0 = sum(1 for (b, d) in barcode_0 if b < thresh and (d == float('inf') or d > thresh))
         count_1 = sum(1 for (b, d) in barcode_1 if b < thresh and (d == float('inf') or d > thresh))
@@ -93,36 +87,35 @@ class TopoSpectralEngine:
         perc_0, perc_1 = self.persistent_homology(adj)
         cent = self.eigenvector_centrality(G)
 
+        # ---- Convert cent to numpy array (fixes the multiplication error) ----
+        cent = np.array(cent)
+
         # ----- Return / volatility / momentum biases -----
         recent = self.returns.iloc[-self.corr_window:]
         avg_return = recent.mean().values
         volatility = recent.std().values
         momentum = self.returns.iloc[-config.MOMENTUM_DAYS:].mean().values
 
-        # Make non‑negative
         avg_return = np.maximum(avg_return, 0)
         momentum = np.maximum(momentum, 0)
 
-        # Connectivity factor: low λ₂ → high factor
         if len(lap_eigs) > 0:
             connectivity_factor = 1.0 / (1.0 + lap_eigs[0] * 10)
         else:
             connectivity_factor = 1.0
 
-        # Loop boost
         loop_boost = 1 + config.PERSISTENCE_THRESHOLD * perc_1
 
-        # Bias terms
         return_bias = 1 + config.RETURN_BIAS * avg_return
         vol_bias = 1 + config.VOLATILITY_BIAS * volatility
         mom_bias = 1 + config.MOMENTUM_BIAS * momentum
 
-        # Final score
+        # All terms are now numpy arrays or scalars
         scores = cent * connectivity_factor * loop_boost * return_bias * vol_bias * mom_bias
 
         return {
             "scores": scores,
-            "centrality": cent,
+            "centrality": cent.tolist(),
             "lap_eigs": lap_eigs.tolist(),
             "hodge_eigs": hodge_eigs,
             "persistence_0": perc_0,
