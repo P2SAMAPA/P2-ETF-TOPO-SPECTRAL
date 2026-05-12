@@ -1,3 +1,7 @@
+"""
+Daily training: rolling correlation graph, compute spectral & topological features,
+rank ETFs by combined score, output top 3 per universe.
+"""
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -6,6 +10,20 @@ from datetime import datetime
 import config
 import data_manager
 from topological_engine import TopoSpectralEngine
+
+def convert_to_serializable(obj):
+    """Recursively convert numpy types to Python native types."""
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, dict):
+        return {k: convert_to_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [convert_to_serializable(i) for i in obj]
+    return obj
 
 def main():
     if not config.HF_TOKEN:
@@ -18,7 +36,6 @@ def main():
 
     for universe_name, tickers in config.UNIVERSES.items():
         print(f"\n=== Universe: {universe_name} ===")
-        # Prepare returns matrix for universe
         returns = data_manager.prepare_returns_matrix(df, tickers)
         if returns.empty or len(returns) < config.CORR_WINDOW + 10:
             print("  Insufficient data")
@@ -35,20 +52,23 @@ def main():
 
         scores = result["scores"]
         assets = result["assets"]
-        # Sort by score descending, top N
         sorted_idx = np.argsort(scores)[::-1]
         top_etfs = [{"ticker": assets[i], "score": float(scores[i])} for i in sorted_idx[:config.TOP_N]]
         print(f"  Top 3 ETFs: {[e['ticker'] for e in top_etfs]} (scores: {[e['score'] for e in top_etfs]})")
 
+        # Convert all metadata to JSON‑serializable form
+        centrality_dict = {assets[i]: float(result["centrality"][i]) for i in range(len(assets))}
+        metadata = {
+            "centrality": centrality_dict,
+            "lap_eigs": convert_to_serializable(result["lap_eigs"]),
+            "hodge_eigs": convert_to_serializable(result["hodge_eigs"]),
+            "persistence_0": int(result["persistence_0"]),
+            "persistence_1": int(result["persistence_1"])
+        }
+
         all_results[universe_name] = {
             "top_etfs": top_etfs,
-            "metadata": {
-                "centrality": {assets[i]: float(result["centrality"][i]) for i in range(len(assets))},
-                "lap_eigs": result["lap_eigs"],
-                "hodge_eigs": result["hodge_eigs"],
-                "persistence_0": result["persistence_0"],
-                "persistence_1": result["persistence_1"]
-            },
+            "metadata": metadata,
             "run_date": today
         }
 
