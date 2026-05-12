@@ -17,20 +17,22 @@ UNIVERSES = {
     ]
 }
 
-# Rolling window for correlation (days) – shorter = more responsive for return chasing
-CORR_WINDOW = 30   # was 60
+# Rolling window for correlation (days)
+CORR_WINDOW = 30
 
-# Persistence thresholds
-FILTRATION_STEPS = 50
+# Persistence
 PERSISTENCE_THRESHOLD = 0.5
 
-# Bias parameters: increase these to chase returns/volatility
-RETURN_BIAS = 2.0        # multiplies score by ETF's average daily return (positive only)
-VOLATILITY_BIAS = 1.0    # multiplies score by ETF's volatility (0 = ignore)
-MOMENTUM_DAYS = 5        # recent return window for momentum
-MOMENTUM_BIAS = 1.5      # multiplies score by recent return
+# Bias parameters – aggressive chasing
+RETURN_SCALE = 500.0      # multiplies average daily return
+VOL_SCALE = 200.0         # multiplies daily volatility
+MOMENTUM_SCALE = 300.0    # multiplies recent return (5 days)
 
-# Use signed correlation (True = keep negative edges, may increase risk awareness)
-USE_SIGNED_CORR = False   # keep False for stability, True for chasing opposite moves
+# Use signed correlation? (false = absolute)
+USE_SIGNED_CORR = False
 
+# Topological weight (1 = full topology, 0 = pure return chasing)
+TOPOLOGICAL_WEIGHT = 1.0   # keep topology but biases are amplified
+
+MOMENTUM_DAYS = 5
 TOP_N = 3
