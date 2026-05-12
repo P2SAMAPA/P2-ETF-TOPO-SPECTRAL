@@ -32,7 +32,7 @@ MOMENTUM_SCALE = 300.0    # multiplies recent return (5 days)
 USE_SIGNED_CORR = False
 
 # Topological weight (1 = full topology, 0 = pure return chasing)
-TOPOLOGICAL_WEIGHT = 0.0   # keep topology but biases are amplified
+TOPOLOGICAL_WEIGHT = 0.3   # keep topology but biases are amplified
 
 MOMENTUM_DAYS = 5
 TOP_N = 3
