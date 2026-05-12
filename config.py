@@ -18,10 +18,10 @@ UNIVERSES = {
 }
 
 # Rolling window for correlation (days)
-CORR_WINDOW = 120
+CORR_WINDOW = 252
 
 # Persistence thresholds
-FILTRATION_STEPS = 100
+FILTRATION_STEPS = 500
 PERSISTENCE_THRESHOLD = 0.5   # for barcode counting
 
 TOP_N = 3
