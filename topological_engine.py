@@ -1,9 +1,15 @@
+"""
+Persistent Spectral Graph + Hodge Laplacian Engine.
+Computes graph Laplacian eigenvalues, Hodge 1-Laplacian eigenvalues,
+persistent homology barcodes, and a return‑biased topological score.
+"""
 import numpy as np
 import pandas as pd
 from scipy.sparse.linalg import eigs
 from scipy.sparse import csr_matrix
 import networkx as nx
 import gudhi as gd
+import config   # for bias parameters
 
 class TopoSpectralEngine:
     def __init__(self, returns_df, corr_window=60, filtration_steps=50):
@@ -15,34 +21,30 @@ class TopoSpectralEngine:
 
     def compute_correlation_graph(self):
         """Weighted graph from rolling correlation (last `corr_window` days)."""
-        # Use all data to get last window correlation
         if len(self.returns) < self.corr_window:
             raise ValueError("Not enough data")
         recent = self.returns.iloc[-self.corr_window:]
-        corr = recent.corr().abs().values
+        corr = recent.corr().abs().values if not config.USE_SIGNED_CORR else recent.corr().values
         # Adjacency matrix (weighted)
         adj = corr - np.eye(self.n_assets)  # remove self
         G = nx.from_numpy_array(adj, create_using=nx.Graph())
-        # keep only positive weights
-        edges_to_remove = [(u,v) for u,v,w in G.edges(data=True) if w['weight'] <= 0]
-        G.remove_edges_from(edges_to_remove)
+        # remove negative edges if using signed
+        if config.USE_SIGNED_CORR:
+            edges_to_remove = [(u, v) for u, v, w in G.edges(data=True) if w['weight'] <= 0]
+            G.remove_edges_from(edges_to_remove)
         return G, adj
 
     def graph_laplacian_eigenvalues(self, G, k=5):
-        """Compute smallest k eigenvalues of graph Laplacian (excluding 0)."""
+        """Compute smallest k eigenvalues of graph Laplacian (excluding zero)."""
         L = nx.laplacian_matrix(G).astype(float)
-        # Compute largest eigenvalues first? We need smallest > 0.
-        # Use scipy.sparse.linalg.eigs with which='SM' is slow. Use numpy dense for small graphs.
         L_dense = L.toarray()
         eigvals = np.linalg.eigvalsh(L_dense)
         eigvals = np.sort(eigvals)
-        # Filter out near-zero (numerical)
         eigvals = eigvals[eigvals > 1e-6]
         return eigvals[:min(k, len(eigvals))]
 
     def hodge_1_laplacian_eigenvalues(self, G):
         """Compute eigenvalues of 1st-order Hodge Laplacian (edge Laplacian)."""
-        # Build incidence matrix B (nodes x edges)
         edges = list(G.edges())
         if not edges:
             return []
@@ -52,36 +54,27 @@ class TopoSpectralEngine:
         for i, (u, v) in enumerate(edges):
             B[u, i] = 1.0
             B[v, i] = -1.0
-        # Weighted? Use weights from graph
-        W = np.diag([G[u][v]['weight'] for u,v in edges])
-        L1 = B @ W @ B.T  # edge Laplacian (sometimes defined differently, but this is standard)
-        # More common: L1 = B.T @ B (for unweighted). We'll use B.T @ B for simplicity.
         L1_simple = B.T @ B
         eigvals = np.linalg.eigvalsh(L1_simple)
         eigvals = np.sort(eigvals)
         eigvals = eigvals[eigvals > 1e-6]
-        return eigvals[:5]  # return top few
+        return eigvals[:5].tolist()
 
     def persistent_homology(self, adj):
         """Compute persistence barcodes for graph filtration."""
-        # Rips complex from correlation matrix (weighted graph)
-        # Use distance = 1 - corr (so that high correlation = small distance)
-        dist = 1 - adj
-        # Convert to lower triangular list for Rips
-        # Create point cloud? For graph, we can use a Rips complex from distances between nodes.
-        # Alternative: use graph filtration by threshold on edge weights.
-        # We'll use gudhi's RipsComplex on the distance matrix.
+        # Use distance = 1 - abs(corr)
+        dist = 1 - np.abs(adj)
+        # Build Rips complex
         rips = gd.RipsComplex(distance_matrix=dist, max_edge_length=1.0)
         simplex_tree = rips.create_simplex_tree(max_dimension=2)
-        # Compute persistence
         persistence = simplex_tree.persistence()
-        # Extract intervals for dimension 0 and 1
+        # Extract intervals
         barcode_0 = [interval for dim, interval in persistence if dim == 0]
         barcode_1 = [interval for dim, interval in persistence if dim == 1]
-        # Count intervals that persist beyond threshold (birth < threshold)
-        # We'll use birth and death; for infinite death we treat as > threshold
-        count_0 = sum(1 for (b,d) in barcode_0 if b < 0.5 and (d == float('inf') or d > 0.5))
-        count_1 = sum(1 for (b,d) in barcode_1 if b < 0.5 and (d == float('inf') or d > 0.5))
+        # Count intervals that persist beyond threshold
+        thresh = config.PERSISTENCE_THRESHOLD
+        count_0 = sum(1 for (b, d) in barcode_0 if b < thresh and (d == float('inf') or d > thresh))
+        count_1 = sum(1 for (b, d) in barcode_1 if b < thresh and (d == float('inf') or d > thresh))
         return count_0, count_1
 
     def eigenvector_centrality(self, G):
@@ -93,36 +86,49 @@ class TopoSpectralEngine:
         return [cent[i] for i in range(self.n_assets)]
 
     def run(self):
-        """Compute all spectral/topological features and return scores per ETF."""
+        """Compute spectral/topological features and return return‑biased scores."""
         G, adj = self.compute_correlation_graph()
-        # Graph Laplacian eigenvalues
         lap_eigs = self.graph_laplacian_eigenvalues(G, k=3)
-        # Hodge 1-Laplacian eigenvalues
         hodge_eigs = self.hodge_1_laplacian_eigenvalues(G)
-        # Persistence barcodes
         perc_0, perc_1 = self.persistent_homology(adj)
-        # Eigenvector centrality
         cent = self.eigenvector_centrality(G)
-        # Combine into a single score: higher centrality * (more persistent loops) 
-        # and penalise high eigenvalue change (we'll use lap_eigs[0] as algebraic connectivity)
-        # We'll compute a ranking per ETF directly.
-        # For simplicity, we output raw centrality and metrics; ranking will be done by highest centrality.
-        # But we want to emphasise topological features: we can weight centrality by (1 + perc_1) / (1 + lap_eigs[0])
-        # to boost ETFs in graphs with many persistent cycles and low connectivity (more fragile).
-        # Let's produce a score = centrality * (1 + perc_1) * (1 / (1 + lap_eigs[0]))   (if lap_eigs exists)
+
+        # ----- Return / volatility / momentum biases -----
+        recent = self.returns.iloc[-self.corr_window:]
+        avg_return = recent.mean().values
+        volatility = recent.std().values
+        momentum = self.returns.iloc[-config.MOMENTUM_DAYS:].mean().values
+
+        # Make non‑negative
+        avg_return = np.maximum(avg_return, 0)
+        momentum = np.maximum(momentum, 0)
+
+        # Connectivity factor: low λ₂ → high factor
         if len(lap_eigs) > 0:
-            connectivity_factor = 1.0 / (1.0 + lap_eigs[0] * 10)  # small lambda2 -> high factor
+            connectivity_factor = 1.0 / (1.0 + lap_eigs[0] * 10)
         else:
             connectivity_factor = 1.0
-        loop_boost = 1 + perc_1 * 0.5
-        scores = [c * connectivity_factor * loop_boost for c in cent]
-        # Also include centrality as raw
+
+        # Loop boost
+        loop_boost = 1 + config.PERSISTENCE_THRESHOLD * perc_1
+
+        # Bias terms
+        return_bias = 1 + config.RETURN_BIAS * avg_return
+        vol_bias = 1 + config.VOLATILITY_BIAS * volatility
+        mom_bias = 1 + config.MOMENTUM_BIAS * momentum
+
+        # Final score
+        scores = cent * connectivity_factor * loop_boost * return_bias * vol_bias * mom_bias
+
         return {
             "scores": scores,
             "centrality": cent,
-            "lap_eigs": lap_eigs.tolist() if len(lap_eigs) else [],
+            "lap_eigs": lap_eigs.tolist(),
             "hodge_eigs": hodge_eigs,
             "persistence_0": perc_0,
             "persistence_1": perc_1,
-            "assets": self.assets
+            "assets": self.assets,
+            "avg_returns": avg_return.tolist(),
+            "volatility": volatility.tolist(),
+            "momentum": momentum.tolist()
         }
