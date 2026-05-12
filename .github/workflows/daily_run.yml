@@ -1,4 +1,4 @@
-name: Daily Contrastive Run
+name: Daily Topo Spectral Run
 
 on:
   schedule:
